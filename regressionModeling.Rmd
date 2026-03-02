@@ -1,6 +1,6 @@
 ---
 title: "Modelling competition"
-author: "Los Lachinos"
+author: "Ning Tian"
 date: "2025-12-22"
 output: html_document
 ---
@@ -712,4 +712,5 @@ summary(predictions)
 Predictions are saved:
 ```{r}
 write_xlsx(as.data.frame(predictions), "Predictions.xlsx")
+
 ```
