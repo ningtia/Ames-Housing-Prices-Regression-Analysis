@@ -1,0 +1,715 @@
+---
+title: "Modelling competition"
+author: "Los Lachinos"
+date: "2025-12-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+# Libraries
+library(readr, quietly = T)
+library(tidyverse, quietly = T)
+library(naniar, quietly = T)
+library(missForest, quietly = T)
+library(skimr, quietly = T)
+library(dlookr, quietly = T)
+library(pheatmap, quietly = T)
+library(performance, quietly = T)
+library(caret, quietly = T)
+library(insight, quietly = T)
+library(MASS, quietly = T)
+library(writexl, quietly = T)
+```
+
+## Data importation
+
+Training and testing sets are imported:
+
+```{r, results="hide", message=FALSE, warning=FALSE}
+train <- read_csv("train.csv")
+test <- read_csv("test.csv")
+```
+
+## Preprocessing
+
+A series of preprocessing tasks were carried out in order to obtain a clean dataset. These include:
+
+### Removing variables
+
+The IDs are removed for the testing set:
+
+```{r}
+test <- test %>%
+  dplyr::select(-Id)
+```
+
+Variables that had extremely few unique values were removed:
+
+```{r}
+  # Exploratory analysis (commented out to avoid a long output):
+# table(train$Condition2)
+# table(train$Condition1, train$Condition2)
+
+# train %>%
+#   filter(Exterior1st != Exterior2nd) %>%
+#   count() / nrow(train)
+
+  # Removal
+train$Condition2 = NULL
+test$Condition2 = NULL
+train$Exterior2nd = NULL
+test$Exterior2nd = NULL
+```
+
+Other variables had a large amount of values equal to "NO" or to zero, depending on the case. As these variables will probably contribute nothing to the model, they are eliminated:
+
+```{r}
+train$GarageYrBlt = NULL
+train$KitchenAbvGr = NULL
+train$LowQualFinSF = NULL
+train$MiscVal = NULL
+train$BsmtFinSF2 = NULL
+train$BsmtFinType2 = NULL
+train$Utilities = NULL
+train$Street = NULL
+train$Alley = NULL
+train$Fence = NULL
+train$Functional = NULL
+train$PoolArea = NULL
+train$PoolQC = NULL
+
+test$GarageYrBlt = NULL
+test$KitchenAbvGr = NULL
+test$LowQualFinSF = NULL
+test$MiscVal = NULL
+test$BsmtFinSF2 = NULL
+test$BsmtFinType2 = NULL
+test$Utilities = NULL
+test$Street = NULL
+test$Alley = NULL
+test$Fence = NULL
+test$Functional = NULL
+test$PoolArea = NULL
+test$PoolQC = NULL
+```
+
+Some variables refer to the condition in which a sale was conducted and have no relation to the house itself. Therefore they are removed (`YrSold` will be removed later):
+
+```{r}
+train$MoSold = NULL
+train$SaleType = NULL
+train$SaleCondition = NULL
+
+test$MoSold = NULL
+test$SaleType = NULL
+test$SaleCondition = NULL
+```
+
+### Recoding variables
+
+Some variables have missing values (`NA`) which actually indicate the absence of a certain element (as opposed to missing information). This variables are therefore recoded:
+
+```{r}
+var_with_na = c("BsmtQual", "BsmtCond", "BsmtExposure", "BsmtFinType1",
+                "FireplaceQu", "GarageType", "GarageFinish",
+                "GarageQual", "GarageCond", "MiscFeature")
+
+for (name in var_with_na) {
+  train[[name]] <- impute_factor(train[[name]], "NO")
+  test[[name]] <- impute_factor(test[[name]], "NO")
+}
+```
+
+Nominal variables are transformed to factor:
+
+```{r}
+var_to_fct = c("MSZoning", "LandContour", "LotConfig",
+               "Neighborhood", "BldgType", "HouseStyle", "RoofStyle", "RoofMatl",
+               "MasVnrType", "Foundation", "Heating", "Electrical")
+
+for (name in var_to_fct) {
+  train[[name]] <- as.factor(train[[name]])
+  test[[name]] <- as.factor(test[[name]])
+}
+```
+
+Ordinal variables are transformed to factor, explicitely indicating the order of their levels:
+
+```{r}
+# Training set
+train$LotShape = factor(train$LotShape, levels = c("Reg", "IR1", "IR2", "IR3"))
+train$LandSlope = factor(train$LandSlope, levels = c("Gtl", "Mod", "Sev"))
+train$OverallQual = ordered(train$OverallQual)
+train$OverallCond = ordered(train$OverallCond)
+train$ExterQual = factor(train$ExterQual, levels = c("Po","Fa", "TA", "Gd", "Ex"))
+train$ExterCond = factor(train$ExterCond, levels = c("Po", "Fa", "TA", "Gd", "Ex"))
+train$BsmtQual = factor(train$BsmtQual, levels = c("NO", "Po", "Fa", "TA", "Gd", "Ex"))
+train$BsmtCond = factor(train$BsmtCond, levels = c("NO", "Po", "Fa", "TA", "Gd", "Ex"))
+train$HeatingQC = factor(train$HeatingQC, levels = c("Po", "Fa", "TA", "Gd", "Ex"))
+train$CentralAir = factor(train$CentralAir, levels = c("N", "Y"))
+train$KitchenQual = factor(train$KitchenQual, levels = c("Po", "Fa", "TA", "Gd", "Ex"))
+train$FireplaceQu = factor(train$FireplaceQu, levels = c("NO", "Po", "Fa", "TA", "Gd", "Ex"))
+train$GarageType = fct_relevel(train$GarageType, "NO")
+train$GarageFinish = factor(train$GarageFinish, levels = c("NO", "Unf", "RFn", "Fin"))
+train$GarageQual = factor(train$GarageQual, levels = c("NO", "Po", "Fa", "TA", "Gd", "Ex"))
+train$GarageCond = factor(train$GarageCond, levels = c("NO", "Po", "Fa", "TA", "Gd", "Ex"))
+train$PavedDrive = factor(train$PavedDrive, levels = c("N", "P", "Y"))
+train$MasVnrType = impute_factor(train$MasVnrType, "None")
+train$MasVnrType = fct_relevel(train$MasVnrType, "None")
+train$BsmtFinType1 = fct_relevel(train$BsmtFinType1, "NO")
+
+# Testing set
+test$LotShape = factor(test$LotShape, levels = c("Reg", "IR1", "IR2", "IR3"))
+test$LandSlope = factor(test$LandSlope, levels = c("Gtl", "Mod", "Sev"))
+test$OverallQual = ordered(test$OverallQual)
+test$OverallCond = ordered(test$OverallCond)
+test$ExterQual = factor(test$ExterQual, levels = c("Po","Fa", "TA", "Gd", "Ex"))
+test$ExterCond = factor(test$ExterCond, levels = c("Po", "Fa", "TA", "Gd", "Ex"))
+test$BsmtQual = factor(test$BsmtQual, levels = c("NO", "Po", "Fa", "TA", "Gd", "Ex"))
+test$BsmtCond = factor(test$BsmtCond, levels = c("NO", "Po", "Fa", "TA", "Gd", "Ex"))
+test$HeatingQC = factor(test$HeatingQC, levels = c("Po", "Fa", "TA", "Gd", "Ex"))
+test$CentralAir = factor(test$CentralAir, levels = c("N", "Y"))
+test$KitchenQual = factor(test$KitchenQual, levels = c("Po", "Fa", "TA", "Gd", "Ex"))
+test$FireplaceQu = factor(test$FireplaceQu, levels = c("NO", "Po", "Fa", "TA", "Gd", "Ex"))
+test$GarageType = fct_relevel(test$GarageType, "NO")
+test$GarageFinish = factor(test$GarageFinish, levels = c("NO", "Unf", "RFn", "Fin"))
+test$GarageQual = factor(test$GarageQual, levels = c("NO", "Po", "Fa", "TA", "Gd", "Ex"))
+test$GarageCond = factor(test$GarageCond, levels = c("NO", "Po", "Fa", "TA", "Gd", "Ex"))
+test$PavedDrive = factor(test$PavedDrive, levels = c("N", "P", "Y"))
+test$MasVnrType = impute_factor(test$MasVnrType, "None")
+test$MasVnrType = fct_relevel(test$MasVnrType, "None")
+test$BsmtFinType1 = fct_relevel(test$BsmtFinType1, "NO")
+```
+
+Some variables had levels that were present in the testing set but not in the training set. In order to being able to make predictions, these levels are manually introduced (otherwise, R won't run the `predict()` function):
+
+```{r}
+# Variable MSSubClass
+train$MSSubClass = ifelse(train$MSSubClass == "150" | train$MSSubClass == "160", "150 or 160", train$MSSubClass)
+test$MSSubClass = ifelse(test$MSSubClass == "150" | test$MSSubClass == "160", "150 or 160", test$MSSubClass)
+
+train$MSSubClass = factor(train$MSSubClass, levels = c(
+ "20", "30", "40", "45", "50", "60", "70", "75", "80", "85", "90", "120", "150 or 160", "180", "190"))
+
+test$MSSubClass <- factor(
+    test$MSSubClass, levels = levels(train$MSSubClass))
+
+# Variable Exterior1st
+train$Exterior1st = as.factor(ifelse(train$Exterior1st == "BrkComm" | train$Exterior1st == "BrkFace", "Brk", train$Exterior1st))
+test$Exterior1st = ifelse(test$Exterior1st == "BrkComm" | test$Exterior1st == "BrkFace", "Brk", test$Exterior1st)
+
+test$Exterior1st <- factor(
+    test$Exterior1st, levels = levels(train$Exterior1st))
+```
+
+Variable `Condition1` is simplified:
+
+```{r}
+train <- train  %>%
+  mutate(
+    Condition1 =
+      case_when(
+        Condition1 %in% c("RRAe", "RRAn", "RRNe", "RRNn") ~ "Railroad",
+        Condition1 %in% c("Artery", "Feedr")             ~ "Street",
+        Condition1 %in% c("PosA", "PosN")                ~ "Positive",
+        Condition1 == "Norm"                             ~ "Nothing",
+      )
+  )
+train$Condition1 = fct_relevel(train$Condition1, "Nothing")
+
+test <- test  %>%
+  mutate(
+    Condition1 =
+      case_when(
+        Condition1 %in% c("RRAe", "RRAn", "RRNe", "RRNn") ~ "Railroad",
+        Condition1 %in% c("Artery", "Feedr")             ~ "Street",
+        Condition1 %in% c("PosA", "PosN")                ~ "Positive",
+        Condition1 == "Norm"                             ~ "Nothing",
+      )
+  )
+test$Condition1 = fct_relevel(test$Condition1, "Nothing")
+```
+
+### Creation of new variables
+
+Instead of working with the age in which the house was built, the age at when the house is calculated:
+
+```{r}
+train$Age = train$YrSold - train$YearBuilt
+test$Age = test$YrSold - test$YearBuilt
+train$YearBuilt = NULL
+test$YearBuilt = NULL
+
+train$AgeRemod = train$YrSold - train$YearRemodAdd
+test$AgeRemod = test$YrSold - test$YearRemodAdd
+train$YearRemodAdd = NULL
+test$YearRemodAdd = NULL
+
+train$YrSold = NULL
+test$YYrSold = NULL
+```
+
+The variable `MiscFeature` is removed, as more than 90% of the values were "No". The only information worth keeping from the variable (whether the house has a shed) is saved into a new variable: `HasShed`.
+
+```{r}
+table(train$MiscFeature)
+
+train$HasShed = as.factor(ifelse(train$MiscFeature!="Shed"|is.na(train$MiscFeature),
+                                 "No", "Yes"))
+train$MiscFeature = NULL
+train$MiscVal = NULL
+
+test$HasShed = as.factor(ifelse(test$MiscFeature!="Shed"|is.na(test$MiscFeature),
+                                "No", "Yes"))
+test$MiscFeature = NULL
+test$MiscVal = NULL
+
+```
+
+The variables for the areas of the different kinds of porch are summed, thus creating the new variable `TotalPorch`. In addition, a new variable indicating whether the house has a porch is created:
+
+```{r}
+train$TotalPorch = train$OpenPorchSF + train$EnclosedPorch + train$`3SsnPorch` + train$ScreenPorch
+train$HasPorch = as.factor(ifelse(train$TotalPorch == 0, "No", "Yes"))
+train$OpenPorchSF = NULL
+train$EnclosedPorch = NULL
+train$`3SsnPorch` = NULL
+train$ScreenPorch = NULL
+
+test$TotalPorch = test$OpenPorchSF + test$EnclosedPorch + test$`3SsnPorch` + test$ScreenPorch
+test$HasPorch = as.factor(ifelse(test$TotalPorch == 0, "No", "Yes"))
+test$OpenPorchSF = NULL
+test$EnclosedPorch = NULL
+test$`3SsnPorch` = NULL
+test$ScreenPorch = NULL
+```
+
+The variable `TotalHalfBath` is created as the sum of the `BsmtHalfBath` and `HalfBath` variables, as the first one has a large amount of zeros:
+
+```{r}
+table(train$BsmtHalfBath)
+train$TotalHalfBath  = train$BsmtHalfBath + train$HalfBath
+train$BsmtHalfBath = NULL
+train$HalfBath = NULL
+
+test$TotalHalfBath  = test$BsmtHalfBath + test$HalfBath
+test$BsmtHalfBath = NULL
+test$HalfBath = NULL
+```
+
+A new variable indicating whether a house has a basement is created:
+
+```{r}
+train$HasBasement <- ifelse(train$TotalBsmtSF == 0, 0, 1)
+train$HasBasement <- factor(train$HasBasement, levels = c(0, 1))
+test$HasBasement <- ifelse(test$TotalBsmtSF == 0, 0, 1)
+test$HasBasement <- factor(test$HasBasement, levels = c(0, 1))
+```
+
+### Data imputation
+
+We calculate the number of missing values and the variables in which they are present:
+
+```{r}
+missing_data = miss_var_summary(train)
+missing_data %>%
+  filter(n_miss > 0)
+
+missing_data = miss_var_summary(test)
+missing_data %>%
+  filter(n_miss > 0)
+```
+
+The missing values in `MasVnrArea` are replaced by zeros:
+
+```{r}
+train$MasVnrArea = impute_zero(train$MasVnrArea)
+test$MasVnrArea = impute_zero(test$MasVnrArea)
+```
+
+For imputing the rest of the missing values, the [missForest](https://arxiv.org/pdf/1105.0828) algorithm was implemented:
+
+```{r}
+set.seed(123)
+train = missForest(as.data.frame(train), maxiter = 50, ntree = 500)$ximp
+test = missForest(as.data.frame(test), maxiter = 50, ntree = 500)$ximp
+```
+
+We check that we have successfully imputed all missing values:
+
+```{r}
+miss_var_summary(train) %>%
+  filter(n_miss > 0)
+miss_var_summary(test) %>%
+  filter(n_miss > 0)
+```
+
+### Other tasks
+
+In order to prevent errors going further, some variables' names are modified:
+
+```{r}
+colnames(train) = make.names(colnames(train))
+colnames(test) = make.names(colnames(test))
+```
+
+For some houses, it was found that the value of `YrSold` is larger than that of `testp$YearBuilt` (implying that the house was built after being sold). This mistake is corrected:
+
+```{r}
+min(train$Age)
+min(train$AgeRemod)
+min(test$Age)
+min(test$AgeRemod)
+
+train$AgeRemod = ifelse(train$AgeRemod < 0, abs(train$AgeRemod), train$AgeRemod)
+test$Age = ifelse(test$Age < 0, abs(test$Age), test$Age)
+test$AgeRemod = ifelse(test$AgeRemod < 0, abs(test$AgeRemod), test$AgeRemod)
+
+min(train$AgeRemod)
+min(test$Age)
+min(test$AgeRemod)
+```
+
+## Exploratory data analysis and feature selection
+
+Having cleaned the dataset, the remaining variables are analysed. In practice, some of these functions where run alongside the preprocessing, but are presented here for better organization.
+
+A summary of the training set is presented:
+
+```{r}
+skim(train)
+```
+
+Numerical and categorical features are analysed separately to find potential issues:
+
+```{r}
+diagnose_numeric(train)
+```
+
+```{r}
+diagnose_category(train)
+```
+
+A correlation matrix is built for the numerical variables:
+
+```{r}
+mat_cor = train[,2:60] %>%
+  mutate(OverallQual = as.numeric(OverallQual),
+         OverallCond = as.numeric(OverallCond)
+         ) %>%
+  dplyr::select(where(is.numeric)) %>%
+  cor()
+
+pheatmap(mat_cor, display_numbers = TRUE, number_color = "black",
+         fontsize_number = 8, angle_col = 45,
+         cluster_cols = FALSE, cluster_rows = FALSE)
+
+```
+
+Variables with potential outliers were explored:
+
+```{r}
+# A vector with the index of columns with outliers
+col_out = train %>%
+  find_outliers()
+
+# Commented out to avoid a large output
+for (col in col_out) {
+  plot(train[,col], log(train$SalePrice), main=names(train)[col])
+  text(
+    x = train[,col],
+    y = log(train$SalePrice),
+    labels = train$Id,
+    pos = 3
+  )
+}
+```
+
+Skewness is calculated for numeric variables, and they are plotted against the response variable, which gives an idea about which predictors should be transformed
+
+```{r}
+numeric_cols <- sapply(train, is.numeric)
+numeric_cols[1] = FALSE
+skew = sapply(train[, numeric_cols], skewness)
+skew[abs(skew) > 0.5]
+
+# Commented out to avoid a large output
+for (var in names(skew)) {
+  plot(train[,var], log(train$SalePrice), main=var)
+  text(
+    x = var,
+    y = log(train$SalePrice),
+    labels = train$Id,
+    pos = 3
+  )
+}
+```
+
+### Best subset of predictors
+
+To get a better idea of which variables should be included in the model, functions `step()` and `stepAIC()` are applied:
+
+```{r}
+model_all_var = lm(data=train, formula = log(SalePrice) ~ .-Id)
+
+# sel_step = step(model_all_var, trace=0)
+# sel_step = find_predictors(sel_step, flatten = T)
+# print(sel_step)
+```
+
+
+```{r}
+# sel_aic = stepAIC(model_all_var, trace=0)
+# sel_aic = find_predictors(sel_aic, flatten = T)
+# print(sel_aic)
+```
+## Model selection
+
+A series of models were fit and contrasted. Some preprocessing was carried out before:
+
+```{r}
+train_set = train %>%
+  # Convert Y to logarithm
+  mutate(logSalePrice = log(SalePrice)) %>%
+  dplyr::select(-c(Id, SalePrice))
+```
+
+### Model 1
+
+The first model contains all the variables in the dataset:
+
+```{r}
+full_model = lm(data=train_set, formula = logSalePrice ~ .)
+
+# Model information
+# summary(full_model)
+# anova(full_model)
+```
+
+Performance of the model:
+
+```{r}
+performance(full_model)
+```
+
+### Model 2
+
+For the second model, log transformations are applied to certain variables, based on the exploratory analysis. In addition, some variables that were strongly correlated are removed in order to reduce the effects of multicolinearity:
+
+```{r}
+model_log = lm(data=train_set,
+               formula = logSalePrice ~.-GarageCond-AgeRemod-X1stFlrSF-GarageCars
+-LotArea+log(LotArea)-MasVnrArea+log(MasVnrArea+1)-LotFrontage+log(LotFrontage)-WoodDeckSF+log(WoodDeckSF+1)-TotalPorch+ log(TotalPorch+1) -BsmtFinSF1+ log(BsmtFinSF1+1) -TotalBsmtSF+ log(TotalBsmtSF+1) -BsmtUnfSF+ log(BsmtUnfSF+1)-X2ndFlrSF+ log(X2ndFlrSF+1) -GrLivArea+ log(GrLivArea+1) )
+
+# summary(model_log)
+# anova(model_log)
+```
+
+Performance of the model:
+
+```{r}
+performance(model_log)
+```
+
+### Model 3
+
+For the third model, interactions are added between variables when considered necessary. Some values considered as outliers or extreme observations were removed as well:
+
+```{r}
+# Outlier removal
+train_set$Id = train$Id
+train_set = train_set %>%
+  filter(GrLivArea < 5642) %>%
+  filter(!Id %in% c(c(1001, 411, 524, 633, 463,
+                    314, 336, 250, 707, 452)))
+train_set$Id = NULL
+
+# Model
+model_interaction = lm(data=train_set, logSalePrice~.-GarageCond-AgeRemod-X1stFlrSF-GarageCars
+-LotArea+log(LotArea)-MasVnrArea+log(MasVnrArea+1)-LotFrontage+log(LotFrontage)-WoodDeckSF+log(WoodDeckSF+1)-TotalPorch+ log(TotalPorch+1) -BsmtFinSF1+ log(BsmtFinSF1+1) -TotalBsmtSF+ log(TotalBsmtSF+1) -BsmtUnfSF+ log(BsmtUnfSF+1)-X2ndFlrSF+ log(X2ndFlrSF+1) -GrLivArea+ log(GrLivArea+1) + HasBasement:TotalBsmtSF + HasPorch:TotalPorch )
+
+# summary(model_interaction)
+# anova(model_interaction)
+```
+
+Performance of the model:
+
+```{r}
+performance(model_interaction)
+```
+
+### Model 4
+
+For the fourth model, variables and interactions that were not significant were removed from the model:
+
+```{r}
+model_rem = lm(data=train_set, formula = logSalePrice ~ MSSubClass + MSZoning + LotShape + LandContour + LotConfig + Neighborhood + Condition1 + BldgType + HouseStyle + OverallQual +
+  OverallCond + RoofStyle + RoofMatl + Exterior1st + MasVnrType +
+  ExterQual + ExterCond + Foundation + BsmtQual +
+  BsmtExposure + BsmtFinType1 + Heating + HeatingQC + CentralAir +
+  BsmtFullBath + FullBath+ BedroomAbvGr  + KitchenQual + Fireplaces + GarageType + GarageArea + HasPorch +    TotalHalfBath + log(Age + 1) + log(LotArea) + log(WoodDeckSF + 1) + log(TotalPorch + 1) + log(BsmtFinSF1 + 1) +
+  log(TotalBsmtSF + 1) + log(X2ndFlrSF + 1) + log(GrLivArea + 1))
+
+# summary(model_rem)
+anova(model_rem)
+```
+
+Performance of the model:
+
+```{r}
+performance(model_rem)
+```
+
+### Model 5
+
+For the fifth model, all observations were kept in the model, but the same predictors of Model 4 were kept.
+
+```{r}
+train_set = train %>%
+  # Convert Y to logarithm
+  mutate(logSalePrice = log(SalePrice)) %>%
+  dplyr::select(-c(Id, SalePrice))
+
+model_rem_out = lm(data=train_set, formula = logSalePrice ~ MSSubClass + MSZoning + LotShape + LandContour + LotConfig +
+  Neighborhood + Condition1 + BldgType + HouseStyle + OverallQual +
+  OverallCond + RoofStyle + RoofMatl + Exterior1st + MasVnrType +
+  ExterQual + ExterCond + Foundation + BsmtQual +
+  BsmtExposure + BsmtFinType1 + Heating + HeatingQC + CentralAir +
+  BsmtFullBath + FullBath+ BedroomAbvGr  + KitchenQual + Fireplaces +   GarageType + GarageArea + log(Age + 1) + HasPorch + TotalHalfBath +
+  log(LotArea) + log(WoodDeckSF + 1) +
+  log(TotalPorch + 1) + log(BsmtFinSF1 + 1) +
+  log(TotalBsmtSF + 1) + log(X2ndFlrSF + 1) +
+  log(GrLivArea + 1))
+
+# summary(model_rem_out)
+# anova(model_rem_out)
+```
+
+```{r}
+performance(model_rem_out)
+```
+## Final model diagnosis
+
+After comparing the 4 models, we decide to keep the fourth model.
+The final model is now evaluated.
+
+### Diagnostics
+
+Diagnostic plots are presented:
+
+```{r}
+final_model = model_rem
+
+plot(final_model, ask = F)
+```
+
+No outliers are detected for this model:
+
+```{r}
+check_outliers(final_model)
+```
+
+### Predictive power
+
+K-fold cross validation is utilized to test the predictive power of the model:
+
+```{r}
+set.seed(123)
+
+train_control = trainControl(
+  method = "cv", number = 5)
+
+cv_base = train(
+  formula(final_model),
+  data = train_set,
+  method = "lm",
+  trControl = train_control)
+
+cv_base$results
+```
+
+
+## Model interpretation
+
+We calculate the most important variables, by looking at the ANOVA table:
+
+```{r}
+anova(final_model)
+```
+Tables are constructed for some of the most influential variables:
+
+```{r}
+train %>%
+  group_by(MSSubClass) %>%
+  summarise(
+    n_obs = n(),
+    mean_price = mean(SalePrice)
+  ) %>%
+  arrange(desc(mean_price))
+
+vars = c("OverallQual", "Neighborhood", "MSZoning")
+for (var in vars) {
+  print(
+  train %>%
+  group_by(train[[var]]) %>%
+  summarise(
+    n_obs = n(),
+    mean_price = mean(SalePrice)
+  ) %>%
+  arrange(desc(mean_price))
+)
+}
+# plot of MSSubClass vs SalePrice
+ggplot(train, aes(x = MSZoning  , y = SalePrice)) +
+  geom_boxplot(outlier.alpha = 0.4, fill = "lightblue") +
+  scale_y_continuous(labels = dollar) +
+  labs(
+    title = "Distribution of Sale Price by Dwelling Type (MSZoning  )",
+    x = "Dwelling Type (MSZoning  )",
+    y = "Sale Price"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+```
+
+We select the 10 most expensive houses to analyze its main features:
+
+```{r}
+most_expensive = final_model$model %>%
+  slice_max(logSalePrice, n = 10)
+
+most_expensive
+```
+
+We do the same but for the 10 cheapest houses:
+
+```{r}
+cheapest = final_model$model %>%
+  slice_min(logSalePrice, n = 10)
+
+cheapest
+```
+
+## Predictions
+
+Finally, the model is applied to make predictions on the testing set:
+
+```{r}
+predictions = predict(final_model, newdata = test)
+head(predictions, 10)
+```
+Summary statistics are calculated for the observed values in the training set and those predicted for the testing set. As can be observed, results appear to be similar:
+
+```{r}
+summary(log(train$SalePrice))
+summary(predictions)
+```
+Predictions are saved:
+```{r}
+write_xlsx(as.data.frame(predictions), "Predictions.xlsx")
+```
